@@ -1,15 +1,19 @@
+// src/services/summarize.js
 import OpenAI from "openai";
 import { readData, writeData } from "./storage.js";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function cleanKey(raw) {
+  if (!raw) return "";
+  // remove surrounding quotes + trim whitespace/newlines
+  return raw.replace(/^["']|["']$/g, "").trim();
+}
 
-// quick and cheap cache so it doesn’t re-summarize same link
-function getCacheKey(post) {
-  return post.link || `${post.source}:${post.title}`;
+function keyLooksBad(k) {
+  // if it contains whitespace/newlines anywhere, it's bad for headers
+  return /[\s\r\n]/.test(k);
 }
 
 function stripHtml(html) {
-  // very basic HTML -> text (good enough for “summary”)
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -20,15 +24,12 @@ function stripHtml(html) {
 
 async function fetchPageText(url) {
   try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "bss-bot/1.0" }
-    });
+    const res = await fetch(url, { headers: { "User-Agent": "bss-bot/1.0" } });
     const ct = res.headers.get("content-type") || "";
     if (!res.ok) return "";
     if (!ct.includes("text/html") && !ct.includes("text/plain")) return "";
     const html = await res.text();
     const text = stripHtml(html);
-    // limit to keep costs down
     return text.slice(0, 12000);
   } catch {
     return "";
@@ -39,8 +40,24 @@ export async function summarizePost(post) {
   const store = readData();
   store.summaries ??= {};
 
-  const key = getCacheKey(post);
-  if (store.summaries[key]) return store.summaries[key];
+  const cacheKey = post.link || `${post.source}:${post.title}`;
+  if (store.summaries[cacheKey]) return store.summaries[cacheKey];
+
+  const rawKey = process.env.OPENAI_API_KEY || "";
+  const apiKey = cleanKey(rawKey);
+
+  // If key is missing/bad, don't crash — just return a basic fallback
+  if (!apiKey || keyLooksBad(apiKey)) {
+    const fallback =
+      `WHATS_NEW:\n- New post detected: ${post.title}\n\n` +
+      `MOST_IMPORTANT:\n- Open the link for details\n\n` +
+      `NOTES:\n- (Summaries disabled: OPENAI_API_KEY is missing/invalid)`;
+    store.summaries[cacheKey] = fallback;
+    writeData(store);
+    return fallback;
+  }
+
+  const openai = new OpenAI({ apiKey });
 
   const pageText = post.link ? await fetchPageText(post.link) : "";
   const content = pageText || post.text || "";
@@ -52,8 +69,8 @@ export async function summarizePost(post) {
     "",
     "Summarize this update for a Discord server.",
     "Rules:",
-    "- DO NOT quote long text. No copy/paste release notes.",
-    "- Keep it short and useful.",
+    "- No long quotes.",
+    "- Short, useful bullet points.",
     "- Output EXACTLY this format:",
     "",
     "WHATS_NEW:",
@@ -70,20 +87,21 @@ export async function summarizePost(post) {
     content || "(no page text available)"
   ].join("\n");
 
-  let summaryText = "WHATS_NEW:\n- (Couldn’t read the page text — open the link)\n\nMOST_IMPORTANT:\n- (No summary available)\n\nNOTES:\n- (Try again later)";
+  let summaryText =
+    "WHATS_NEW:\n- (Couldn’t summarize)\n\nMOST_IMPORTANT:\n- (No summary available)\n\nNOTES:\n- Open the link";
 
   try {
     const r = await openai.responses.create({
       model: "gpt-4o-mini",
       input: prompt
     });
-
     summaryText = (r.output_text || "").trim() || summaryText;
   } catch {
-    // keep fallback text
+    // keep fallback
   }
 
-  store.summaries[key] = summaryText;
+  store.summaries[cacheKey] = summaryText;
   writeData(store);
   return summaryText;
 }
+
