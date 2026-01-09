@@ -259,5 +259,16 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 // ===== Login =====
-client.login(process.env.DISCORD_TOKEN);
+function cleanSecret(raw) {
+  return (raw || "").replace(/^["']|["']$/g, "").trim();
+}
+
+const discordToken = cleanSecret(process.env.DISCORD_TOKEN);
+if (!discordToken || /\s/.test(discordToken)) {
+  throw new Error("DISCORD_TOKEN is missing or contains spaces/newlines on Render.");
+}
+
+client.login(discordToken);
+
+
 
