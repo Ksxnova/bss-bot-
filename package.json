@@ -2,8 +2,18 @@
   "name": "bss-bot",
   "version": "1.0.0",
   "type": "module",
+  "private": true,
   "scripts": {
-    "deploy": "node src/deploy-commands.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "openai": "^4.26.0",
+    "rss-parser": "^3.13.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
