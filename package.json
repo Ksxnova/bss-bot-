@@ -1,0 +1,9 @@
+{
+  "name": "bss-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "deploy": "node src/deploy-commands.js",
+    "start": "node src/index.js"
+  }
+}
