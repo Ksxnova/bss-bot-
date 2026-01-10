@@ -1,17 +1,31 @@
 import fs from "fs";
-import path from "path";
 
-const FILE = path.join(process.cwd(), "data.json");
+const FILE = "./data.json";
+
+function defaultData() {
+  return {
+    lastGuids: {},
+    beesmasEndISO: null,
+    summaries: {},
+    beesmasMessageId: null,
+    quests: {} // 👈 ADD THIS LINE
+  };
+}
 
 export function readData() {
+  if (!fs.existsSync(FILE)) {
+    return defaultData();
+  }
+
   try {
-    return JSON.parse(fs.readFileSync(FILE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(FILE, "utf8"));
+    // Ensure new fields exist even if data.json is old
+    return { ...defaultData(), ...data };
   } catch {
-    return { lastGuids: {}, beesmasEndISO: null, summaries: {}, beesmasMessageId: null };
+    return defaultData();
   }
 }
 
 export function writeData(data) {
   fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
 }
-
