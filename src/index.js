@@ -288,6 +288,27 @@ async function answerBssQuestion(question) {
 ========================= */
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  function archiveQuestsIfBeesmasEnded() {
+  const store = readData();
+  const endISO = store.beesmasEndISO || CONFIG.beesmasEndISO;
+  if (!endISO) return;
+
+  const ended = Date.now() > new Date(endISO).getTime();
+  if (!ended) return;
+
+  store.quests ??= {};
+  for (const userId in store.quests) {
+    for (const q of store.quests[userId]) {
+      q.archived = true;
+    }
+  }
+
+  writeData(store);
+}
+
+// run once on startup
+archiveQuestsIfBeesmasEnded();
+
   console.log(
     "Guilds I am in:",
     client.guilds.cache.map((g) => `${g.name} (${g.id})`).join(", ")
@@ -406,3 +427,4 @@ client.on(Events.MessageCreate, async (message) => {
    Login
 ========================= */
 client.login(discordToken);
+
