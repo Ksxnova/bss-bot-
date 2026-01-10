@@ -1,5 +1,17 @@
 // src/index.js
 import "dotenv/config";
+import http from "http";
+
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("bss-bot online\n");
+  })
+  .listen(PORT, "0.0.0.0", () => {
+    console.log("Web port listening on", PORT);
+  });
+
 import fs from "fs";
 import path from "path";
 import url from "url";
@@ -269,6 +281,7 @@ if (!discordToken || /\s/.test(discordToken)) {
 }
 
 client.login(discordToken);
+
 
 
 
