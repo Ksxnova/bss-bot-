@@ -1,17 +1,14 @@
 // src/index.js
+// Full "fresh" index.js including:
+// ✅ Render web-port server (prevents port scan timeout)
+// ✅ Auto-post + summarize updates (BSS + Revolution Macro GitHub)
+// ✅ !bss Q&A command (OpenAI)
+// ✅ Slash commands handler
+// ✅ Beesmas live countdown message that EDITS every 60s in one channel
+// ✅ Safer env handling (trims tokens/keys so Render headers don't break)
+
 import "dotenv/config";
 import http from "http";
-
-const PORT = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("bss-bot online\n");
-  })
-  .listen(PORT, "0.0.0.0", () => {
-    console.log("Web port listening on", PORT);
-  });
-
 import fs from "fs";
 import path from "path";
 import url from "url";
@@ -23,40 +20,57 @@ import {
   EmbedBuilder,
 } from "discord.js";
 import OpenAI from "openai";
+
 import { CONFIG } from "./config.js";
 import { checkFeeds } from "./services/feeds.js";
 import { summarizePost } from "./services/summarize.js";
+import { readData, writeData } from "./services/storage.js";
 
+/* =========================
+   Render Web Service Port (FREE PLAN NEEDS THIS)
+========================= */
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("bss-bot online\n");
+  })
+  .listen(PORT, "0.0.0.0", () => {
+    console.log("Web port listening on", PORT);
+  });
+
+/* =========================
+   Helpers
+========================= */
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    // Needed for !bss prefix command:
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
-
-client.commands = new Collection();
-
-// ===== OpenAI =====
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// ===== Simple cooldown for !bss =====
-const cooldown = new Map(); // userId -> last timestamp
-const COOLDOWN_MS = 8000;
-
-// ===== Load slash commands =====
-const commandsPath = path.join(__dirname, "commands");
-for (const file of fs.readdirSync(commandsPath)) {
-  const cmd = await import(`./commands/${file}`);
-  client.commands.set(cmd.data.name, cmd);
+function cleanSecret(raw) {
+  // removes surrounding quotes + trims whitespace/newlines
+  return (raw || "").replace(/^["']|["']$/g, "").trim();
 }
 
-// ===== Helpers =====
+function hasBadWhitespace(s) {
+  return /[\s\r\n]/.test(s);
+}
+
+function safeLogEnv() {
+  const dt = cleanSecret(process.env.DISCORD_TOKEN);
+  const okDiscord = !!dt && !hasBadWhitespace(dt);
+  console.log("DISCORD_TOKEN ok?", okDiscord);
+
+  const okChannel = !!cleanSecret(process.env.UPDATES_CHANNEL_ID);
+  console.log("UPDATES_CHANNEL_ID set?", okChannel);
+
+  const bcid = cleanSecret(process.env.BEESMAS_CHANNEL_ID);
+  console.log("BEESMAS_CHANNEL_ID set?", !!bcid);
+
+  // Don't print OpenAI key; just show present/not
+  const okOpenAI = !!cleanSecret(process.env.OPENAI_API_KEY);
+  console.log("OPENAI_API_KEY present?", okOpenAI);
+}
+
 function parseSummaryToFields(summaryText) {
-  // Expecting:
+  // Expected format:
   // WHATS_NEW:
   // - ...
   // MOST_IMPORTANT:
@@ -89,7 +103,6 @@ function parseSummaryToFields(summaryText) {
       const item = line.replace(/^-+\s*/, "").trim();
       if (item && out[section]) out[section].push(item);
     } else {
-      // If model didn't use bullets, append to current section
       if (section && out[section]) out[section].push(line);
     }
   }
@@ -99,7 +112,6 @@ function parseSummaryToFields(summaryText) {
     out.whatsNew = [summaryText.slice(0, 400)];
   }
 
-  // Keep fields short enough for Discord
   const join = (arr, maxChars) => {
     const txt = arr.map((x) => `• ${x}`).join("\n");
     return txt.length > maxChars ? txt.slice(0, maxChars - 1) + "…" : txt;
@@ -112,21 +124,131 @@ function parseSummaryToFields(summaryText) {
   };
 }
 
-function isRevelationPost(p) {
+function isRevolutionMacroPost(p) {
   const s = `${p.source || ""} ${p.title || ""} ${p.link || ""}`.toLowerCase();
-  // Detect THIS repo specifically:
+  // Detect this specific repo (you gave):
   if (s.includes("github.com/nosyliam/revolution-macro")) return true;
-  // Fallback if it’s described in text:
-  return s.includes("revelation") && s.includes("macro");
+  // fallback (if text includes the name)
+  return s.includes("revolution") && s.includes("macro");
 }
 
+async function safeSend(channel, payload) {
+  try {
+    await channel.send(payload);
+  } catch {
+    // ignore
+  }
+}
+
+/* =========================
+   Discord Client
+========================= */
+const discordToken = cleanSecret(process.env.DISCORD_TOKEN);
+if (!discordToken || hasBadWhitespace(discordToken)) {
+  throw new Error(
+    "DISCORD_TOKEN is missing or contains spaces/newlines. Fix it in Render Environment variables."
+  );
+}
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    // Needed for !bss:
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+client.commands = new Collection();
+
+/* =========================
+   OpenAI (for !bss only)
+   - If key missing, bot still runs, just disables !bss answers
+========================= */
+const openaiKey = cleanSecret(process.env.OPENAI_API_KEY);
+const openai =
+  openaiKey && !hasBadWhitespace(openaiKey)
+    ? new OpenAI({ apiKey: openaiKey })
+    : null;
+
+/* =========================
+   Cooldown for !bss
+========================= */
+const cooldown = new Map(); // userId -> last timestamp
+const COOLDOWN_MS = 8000;
+
+/* =========================
+   Load Slash Commands
+========================= */
+const commandsPath = path.join(__dirname, "commands");
+for (const file of fs.readdirSync(commandsPath)) {
+  const cmd = await import(`./commands/${file}`);
+  client.commands.set(cmd.data.name, cmd);
+}
+
+/* =========================
+   Beesmas Countdown Message (edits every 60s)
+========================= */
+async function ensureBeesmasCountdownMessage() {
+  const channelId = cleanSecret(process.env.BEESMAS_CHANNEL_ID);
+  if (!channelId) return;
+
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel) return;
+
+  const store = readData();
+
+  const endISO = store.beesmasEndISO || CONFIG.beesmasEndISO;
+  const end = new Date(endISO);
+  if (isNaN(end.getTime())) return;
+
+  const unix = Math.floor(end.getTime() / 1000);
+
+  const content =
+    `🎄 **Beesmas Countdown**\n` +
+    `Ends: <t:${unix}:F>\n` +
+    `Time left: <t:${unix}:R>\n` +
+    `\n*This message updates every 60 seconds.*`;
+
+  // Edit existing message if possible
+  if (store.beesmasMessageId) {
+    const msg = await channel.messages
+      .fetch(store.beesmasMessageId)
+      .catch(() => null);
+
+    if (msg) {
+      await msg.edit(content).catch(() => {});
+      return;
+    }
+
+    // message gone -> recreate
+    store.beesmasMessageId = null;
+    writeData(store);
+  }
+
+  // Create new message and save ID
+  const sent = await channel.send(content).catch(() => null);
+  if (sent) {
+    store.beesmasMessageId = sent.id;
+    writeData(store);
+  }
+}
+
+/* =========================
+   !bss Answering
+========================= */
 async function answerBssQuestion(question) {
+  if (!openai) {
+    return "OpenAI is not configured on this host. Add OPENAI_API_KEY in Render Environment variables.";
+  }
+
   const system =
     "You are a helpful Bee Swarm Simulator assistant. " +
     "Answer clearly and briefly. If unsure, say what you'd check. " +
     "Do not invent exact dates unless provided. " +
-    "Prefer practical tips, steps, and short lists.";
+    "Prefer practical tips and short lists.";
 
+  // Prefer Responses API, fallback to Chat Completions
   try {
     const r = await openai.responses.create({
       model: CONFIG.openaiModel || "gpt-4o-mini",
@@ -154,34 +276,39 @@ async function answerBssQuestion(question) {
         { role: "user", content: question },
       ],
     });
+
     return (
       c.choices?.[0]?.message?.content?.trim() || "I couldn’t generate a response."
     );
   }
 }
 
-async function safeSend(channel, payload) {
-  try {
-    await channel.send(payload);
-  } catch {
-    // ignore
-  }
-}
-
-// ===== Ready =====
+/* =========================
+   Ready
+========================= */
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   console.log(
     "Guilds I am in:",
     client.guilds.cache.map((g) => `${g.name} (${g.id})`).join(", ")
   );
+  safeLogEnv();
 
-  // Auto-post feed updates on an interval
+  // Beesmas message: create/edit immediately, then every 60s
+  await ensureBeesmasCountdownMessage();
+  setInterval(() => {
+    ensureBeesmasCountdownMessage().catch(() => {});
+  }, 60 * 1000);
+
+  // Auto-post updates every N minutes
   setInterval(async () => {
     if (!CONFIG.feeds?.length) return;
 
-    const channelId = process.env.UPDATES_CHANNEL_ID;
-    const channel = await client.channels.fetch(channelId).catch(() => null);
+    const updatesChannelId = cleanSecret(process.env.UPDATES_CHANNEL_ID);
+    const channel = updatesChannelId
+      ? await client.channels.fetch(updatesChannelId).catch(() => null)
+      : null;
+
     if (!channel) return;
 
     const posts = await checkFeeds(CONFIG.feeds);
@@ -190,16 +317,17 @@ client.once(Events.ClientReady, async () => {
       const summary = await summarizePost(p);
       const fields = parseSummaryToFields(summary);
 
-      const rev = isRevelationPost(p);
-      const titlePrefix = rev ? "🧩 Revolution Macro Update" : "📰 BSS Update";
+      const isMacro = isRevolutionMacroPost(p);
+      const prefix = isMacro ? "🧩 Revolution Macro Update" : "📰 BSS Update";
 
-      const embed = new EmbedBuilder().setTitle(`${titlePrefix}: ${p.title}`);
+      const embed = new EmbedBuilder().setTitle(`${prefix}: ${p.title}`);
 
       if (fields.whatsNew)
         embed.addFields({ name: "What’s new", value: fields.whatsNew });
       if (fields.mostImportant)
         embed.addFields({ name: "Most important", value: fields.mostImportant });
-      if (fields.notes) embed.addFields({ name: "Notes", value: fields.notes });
+      if (fields.notes)
+        embed.addFields({ name: "Notes", value: fields.notes });
 
       embed.setDescription(p.link ? `[Open link](${p.link})` : "");
       embed.setFooter({ text: p.source || "Updates" });
@@ -214,7 +342,9 @@ client.once(Events.ClientReady, async () => {
   }, (CONFIG.pollMinutes || 5) * 60 * 1000);
 });
 
-// ===== Slash commands =====
+/* =========================
+   Slash Commands Handler
+========================= */
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -233,7 +363,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ===== Prefix command: !bss <question> =====
+/* =========================
+   Prefix Command: !bss <question>
+========================= */
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
@@ -270,18 +402,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ===== Login =====
-function cleanSecret(raw) {
-  return (raw || "").replace(/^["']|["']$/g, "").trim();
-}
-
-const discordToken = cleanSecret(process.env.DISCORD_TOKEN);
-if (!discordToken || /\s/.test(discordToken)) {
-  throw new Error("DISCORD_TOKEN is missing or contains spaces/newlines on Render.");
-}
-
+/* =========================
+   Login
+========================= */
 client.login(discordToken);
-
-
-
-
